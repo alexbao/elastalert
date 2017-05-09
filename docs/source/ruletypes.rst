@@ -22,12 +22,12 @@ Rule Configuration Cheat Sheet
 +--------------------------------------------------------------+           |
 | ``index`` (string)                                           |           |
 +--------------------------------------------------------------+           |
-| ``name`` (string)                                            |           |
-+--------------------------------------------------------------+           |
 | ``type`` (string)                                            |           |
 +--------------------------------------------------------------+           |
 | ``alert`` (string or list)                                   |           |
 +--------------------------------------------------------------+-----------+
+| ``name`` (string, defaults to the filename)                  |           |
++--------------------------------------------------------------+           |
 | ``use_strftime_index`` (boolean, default False)              |  Optional |
 +--------------------------------------------------------------+           |
 | ``use_ssl`` (boolean, default False)                         |           |
@@ -83,6 +83,8 @@ Rule Configuration Cheat Sheet
 | ``owner`` (string, default empty string)                     |           |
 +--------------------------------------------------------------+           |
 | ``priority`` (int, default 2)                                |           |
++--------------------------------------------------------------+           |
+| ``import`` (string)                                          |           |
 |                                                              |           |
 | IGNORED IF ``use_count_query`` or ``use_terms_query`` is true|           |
 +--------------------------------------------------------------+           +
@@ -93,6 +95,10 @@ Rule Configuration Cheat Sheet
 | ``timestamp_format`` (string, default "%Y-%m-%dT%H:%M:%SZ")  |           |
 +--------------------------------------------------------------+           |
 | ``_source_enabled`` (boolean, default True)                  |           |
++--------------------------------------------------------------+           |
+| ``alert_text_args`` (array of strs)                          |           |
++--------------------------------------------------------------+           |
+| ``alert_text_kw`` (object)                                   |           |
 +--------------------------------------------------------------+-----------+
 
 |
@@ -172,11 +178,13 @@ es_host
 ^^^^^^^
 
 ``es_host``: The hostname of the Elasticsearch cluster the rule will use to query. (Required, string, no default)
+The environment variable ``ES_HOST`` will override this field.
 
 es_port
 ^^^^^^^
 
 ``es_port``: The port of the Elasticsearch cluster. (Required, number, no default)
+The environment variable ``ES_PORT`` will override this field.
 
 index
 ^^^^^
@@ -206,10 +214,18 @@ or loaded from a module. For loading from a module, the alert should be specifie
 Optional Settings
 ~~~~~~~~~~~~~~~~~
 
+import
+^^^^^^
+
+``import``: If specified includes all the settings from this yaml file. This allows common config options to be shared. Note that imported files that aren't
+complete rules should not have a ``.yml`` or ``.yaml`` suffix so that ElastAlert doesn't treat them as rules. Filters in imported files are merged (ANDed)
+with any filters in the rule. (Optional, string, no default)
+
 use_ssl
 ^^^^^^^
 
 ``use_ssl``: Whether or not to connect to ``es_host`` using TLS. (Optional, boolean, default False)
+The environment variable ``ES_USE_SSL`` will override this field.
 
 verify_certs
 ^^^^^^^^^^^^
@@ -219,12 +235,12 @@ verify_certs
 es_username
 ^^^^^^^^^^^
 
-``es_username``: basic-auth username for connecting to ``es_host``. (Optional, string, no default)
+``es_username``: basic-auth username for connecting to ``es_host``. (Optional, string, no default) The environment variable ``ES_USERNAME`` will override this field.
 
 es_password
 ^^^^^^^^^^^
 
-``es_password``: basic-auth password for connecting to ``es_host``. (Optional, string, no default)
+``es_password``: basic-auth password for connecting to ``es_host``. (Optional, string, no default) The environment variable ``ES_PASSWORD`` will override this field.
 
 es_url_prefix
 ^^^^^^^^^^^^^
@@ -232,7 +248,7 @@ es_url_prefix
 ``es_url_prefix``: URL prefix for the Elasticsearch endpoint. (Optional, string, no default)
 
 es_send_get_body_as
-^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^
 
 ``es_send_get_body_as``: Method for querying Elasticsearch. (Optional, string, default "GET")
 
@@ -303,6 +319,18 @@ Then, for the same sample data shown above listing alice and bob's events, Elast
     |      alice       |   something else   |
     +------------------+--------------------+
 
+
+.. note::
+   By default, aggregation time is relative to the current system time, not the time of the match. This means that running elastalert over
+   past events will result in different alerts than if elastalert had been running while those events occured. This behavior can be changed
+   by setting ``aggregate_by_match_time``.
+
+aggregate_by_match_time
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Setting this to true will cause aggregations to be created relative to the timestamp of the first event, rather than the current time. This
+is useful for querying over historic data or if using a very large buffer_time and you want multiple aggregations to occur from a single query.
+
 realert
 ^^^^^^^
 
@@ -336,12 +364,12 @@ query_delay
 This is useful if the data is Elasticsearch doesn't get indexed immediately. (Optional, time)
 
 owner
-^^^^^^^^^^^
+^^^^^
 
 ``owner``: This value will be used to identify the stakeholder of the alert. Optionally, this field can be included in any alert type. (Optional, string)
 
 priority
-^^^^^^^^^^^
+^^^^^^^^
 
 ``priority``: This value will be used to identify the relative priority of the alert. Optionally, this field can be included in any alert type (e.g. for use in email subject/body text). (Optional, int, default 2)
 
@@ -480,7 +508,7 @@ aggregation_key
 ``aggregation_key``: Having an aggregation key in conjunction with an aggregation will make it so that each new value encountered for the aggregation_key field will result in a new, separate aggregation window.
 
 summary_table_fields
-^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^
 
 ``summary_table_fields``: Specifying the summmary_table_fields in conjunction with an aggregation will make it so that each aggregated alert will contain a table summarizing the values for the specified fields in all the matches that were aggregated together.
 
@@ -514,7 +542,7 @@ Some rules and alerts require additional options, which also go in the top level
 .. _testing :
 
 Testing Your Rule
-====================
+=================
 
 Once you've written a rule configuration, you will want to validate it. To do so, you can either run ElastAlert in debug mode,
 or use ``elastalert-test-rule``, which is a script that makes various aspects of testing easier.
@@ -611,7 +639,7 @@ guaranteed to have the exact same results as with Elasticsearch. For example, an
 .. _ruletypes:
 
 Rule Types
-===========
+==========
 
 The various ``RuleType`` classes, defined in ``elastalert/ruletypes.py``, form the main logic behind ElastAlert. An instance
 is held in memory for each rule, passed all of the data returned by querying Elasticsearch with a given filter, and generates
@@ -635,7 +663,15 @@ This rule requires two additional options:
 
 ``compare_key``: The name of the field to use to compare to the blacklist. If the field is null, those events will be ignored.
 
-``blacklist``: A list of blacklisted values. The ``compare_key`` term must be equal to one of these values for it to match.
+``blacklist``: A list of blacklisted values, and/or a list of paths to flat files which contain the blacklisted values using ``- "!file /path/to/file"``; for example::
+
+    blacklist:
+        - value1
+        - value2
+        - "!file /tmp/blacklist1.txt"
+        - "!file /tmp/blacklist2.txt"
+
+It is possible to mix between blacklist value definitions, or use either one. The ``compare_key`` term must be equal to one of these values for it to match.
 
 Whitelist
 ~~~~~~~~~
@@ -649,7 +685,15 @@ This rule requires three additional options:
 
 ``ignore_null``: If true, events without a ``compare_key`` field will not match.
 
-``whitelist``: A list of whitelisted values. The ``compare_key`` term must be in this list or else it will match.
+``whitelist``: A list of whitelisted values, and/or a list of paths to flat files which contain the whitelisted values using  ``- "!file /path/to/file"``; for example::
+
+    whitelist:
+        - value1
+        - value2
+        - "!file /tmp/whitelist1.txt"
+        - "!file /tmp/whitelist2.txt"
+
+It is possible to mix between whitelisted value definitions, or use either one. The ``compare_key`` term must be in this list or else it will match.
 
 Change
 ~~~~~~
@@ -709,7 +753,7 @@ all with the same value of ``query_key``, will trigger an alert.
 the 3rd event will trigger the alert on itself and add the other 2 events in a key named ``related_events`` that can be accessed in the alerter.
 
 Spike
-~~~~~~
+~~~~~
 
 ``spike``: This rule matches when the volume of events during a given time period is ``spike_height`` times larger or smaller
 than during the previous time period. It uses two sliding windows to compare the current and reference frequency
@@ -776,9 +820,9 @@ consider the following examples::
     hour4: 100 events (ref: 120, cur: 200) - No alert because spike_height not met
 
     hour1: 0 events (ref: 0, cur: 0) - No alert because (a) threshold_ref not met, (b) ref window not filled
-    hour1: 20 events (ref: 0, cur: 20) - No alert because (a) threshold_ref not met, (b) ref window not filled
-    hour2: 100 events (ref: 0, cur: 120) - No alert because (a) threshold_ref not met, (b) ref window not filled
-    hour3: 100 events (ref: 20, cur: 200) - Alert because (a) spike_height met, (b) threshold_ref met, (c) ref window filled
+    hour2: 20 events (ref: 0, cur: 20) - No alert because (a) threshold_ref not met, (b) ref window not filled
+    hour3: 100 events (ref: 0, cur: 120) - No alert because (a) threshold_ref not met, (b) ref window not filled
+    hour4: 100 events (ref: 20, cur: 200) - Alert because (a) spike_height met, (b) threshold_ref met, (c) ref window filled
 
     hour1: 1 events (ref: 0, cur: 1) - No alert because (a) threshold_ref not met, (b) ref window not filled
     hour2: 2 events (ref: 0, cur: 3) - No alert because (a) threshold_ref not met, (b) ref window not filled
@@ -870,10 +914,14 @@ This rule requires one additional option:
 
 ``fields``: A list of fields to monitor for new terms. ``query_key`` will be used if ``fields`` is not set. Each entry in the
 list of fields can itself be a list.  If a field entry is provided as a list, it will be interpreted as a set of fields
-that compose a composite key used for the ElasticSearch query.  ``Note: the composite fields may only refer to primitive
-types, otherwise the initial ElasticSearch query will not properly return the aggregation results, thus causing alerts
-to fire every time the ElastAlert service initially launches with the rule. A warning will be logged to the console if
-this scenario is encountered. However, future alerts will actually work as expected after the initial flurry.``
+that compose a composite key used for the ElasticSearch query.
+
+.. note::
+
+   The composite fields may only refer to primitive types, otherwise the initial ElasticSearch query will not properly return
+   the aggregation results, thus causing alerts to fire every time the ElastAlert service initially launches with the rule.
+   A warning will be logged to the console if this scenario is encountered. However, future alerts will actually work as
+   expected after the initial flurry.
 
 Optional:
 
@@ -892,7 +940,7 @@ than regular searching if there is a large number of documents. If this is used,
 that if a new term appears but there are at least 50 terms which appear more frequently, it will not be found.
 
 Cardinality
-~~~~~~~~
+~~~~~~~~~~~
 
 ``cardinality``: This rule matches when a the total number of unique values for a certain field within a time frame is higher or lower
 than a threshold.
@@ -916,11 +964,88 @@ Optional:
 
 ``query_key``: Group cardinality counts by this field. For each unique value of the ``query_key`` field, cardinality will be counted separately.
 
+Metric Aggregation
+~~~~~~~~~~~~~~~~~~
+
+``metric_aggregation``: This rule matches when the value of a metric within the calculation window is higher or lower than a threshold. By 
+default this is ``buffer_time``.
+
+This rule requires:
+
+``metric_agg_key``: This is the name of the field over which the metric value will be calculated. The underlying type of this field must be 
+supported by the specified aggregation type. 
+
+``metric_agg_type``: The type of metric aggregation to perform on the ``metric_agg_key`` field. This must be one of 'min', 'max', 'avg', 
+'sum', 'cardinality', 'value_count'.
+
+``doc_type``: Specify the ``_type`` of document to search for.
+
+This rule also requires at least one of the two following options:
+
+``max_threshold``: If the calculated metric value is greater than this number, an alert will be triggered. This threshold is exclusive.
+
+``min_threshold``: If the calculated metric value is less than this number, an alert will be triggered. This threshold is exclusive.
+
+Optional:
+
+``query_key``: Group metric calculations by this field. For each unique value of the ``query_key`` field, the metric will be calculated and 
+evaluated separately against the threshold(s).
+
+``use_run_every_query_size``: By default the metric value is calculated over a ``buffer_time`` sized window. If this parameter is true 
+the rule will use ``run_every`` as the calculation window.  
+
+``allow_buffer_time_overlap``: This setting will only have an effect if ``use_run_every_query_size`` is false and ``buffer_time`` is greater 
+than ``run_every``. If true will allow the start of the metric calculation window to overlap the end time of a previous run. By default the 
+start and end times will not overlap, so if the time elapsed since the last run is less than the metric calculation window size, rule execution 
+will be skipped (to avoid calculations on partial data). 
+
+``bucket_interval``: If present this will divide the metric calculation window into ``bucket_interval`` sized segments. The metric value will 
+be calculated and evaluated against the threshold(s) for each segment. If ``bucket_interval`` is specified then ``buffer_time`` must be a 
+multiple of ``bucket_interval``. (Or ``run_every`` if ``use_run_every_query_size`` is true).
+  
+``sync_bucket_interval``: This only has an effect if ``bucket_interval`` is present. If true it will sync the start and end times of the metric 
+calculation window to the keys (timestamps) of the underlying date_histogram buckets. Because of the way elasticsearch calculates date_histogram 
+bucket keys these usually round evenly to nearest minute, hour, day etc (depending on the bucket size). By default the bucket keys are offset to 
+allign with the time elastalert runs, (This both avoid calculations on partial data, and ensures the very latest documents are included). 
+See: https://www.elastic.co/guide/en/elasticsearch/reference/current/search-aggregations-bucket-datehistogram-aggregation.html#_offset for a 
+more comprehensive explaination.
+
+Percentage Match
+~~~~~~~~~~~~~~~~
+
+``percentage_match``: This rule matches when the percentage of document in the match bucket within a calculation window is higher or lower 
+than a threshold. By default the calculation window is ``buffer_time``.
+
+This rule requires:
+
+``match_bucket_filter``: ES filter DSL. This defines a filter for the match bucket, which should match a subset of the documents returned by the 
+main query filter.   
+
+``doc_type``: Specify the ``_type`` of document to search for.
+
+This rule also requires at least one of the two following options:
+
+``min_percentage``: If the percentage of matching documents is greater than this number, an alert will be triggered. 
+
+``max_percentage``: If the percentage of matching documents is less than this number, an alert will be triggered.
+
+Optional:
+
+``query_key``: Group percentage by this field. For each unique value of the ``query_key`` field, the percentage will be calculated and 
+evaluated separately against the threshold(s).
+
+``use_run_every_query_size``: See ``use_run_every_query_size`` in  Metric Aggregation rule
+
+``allow_buffer_time_overlap``:  See ``allow_buffer_time_overlap`` in  Metric Aggregation rule
+
+``bucket_interval``: See ``bucket_interval`` in  Metric Aggregation rule
+  
+``sync_bucket_interval``: See ``sync_bucket_interval`` in  Metric Aggregation rule
 
 .. _alerts:
 
 Alerts
-========
+======
 
 Each rule may have any number of alerts attached to it. Alerts are subclasses of ``Alerter`` and are passed
 a dictionary, or list of dictionaries, from ElastAlert which contain relevant information. They are configured
@@ -958,7 +1083,7 @@ In case the rule matches multiple objects in the index, only the first match is 
 If the field(s) mentioned in the arguments list are missing, the email alert will have the text ``<MISSING VALUE>`` in place of its expected value. This will also occur if ``use_count_query`` is set to true.
 
 Alert Content
-~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~
 
 There are several ways to format the body text of the various types of events. In EBNF::
 
@@ -1017,17 +1142,23 @@ in the case of an aggregated alert, as a JSON array, to the stdin of the process
 
 This alert requires one option:
 
-``command``: A list of arguments to execute or a string to execute. If in list format, the first argument is the name of the program to execute. If passing a
-string, the command will be executed through the shell. The command string or args will be formatted using Python's % string format syntax with the
-match passed the format argument. This means that a field can be accessed with ``%(field_name)s``. In an aggregated alert, these fields will come
-from the first match.
+``command``: A list of arguments to execute or a string to execute. If in list format, the first argument is the name of the program to execute. If passed a
+string, the command is executed through the shell.
+
+Strings can be formatted using the old-style format (``%``) or the new-style format (``.format()``). When the old-style format is used, fields are accessed
+using ``%(field_name)s``. When the new-style format is used, fields are accessed using ``{match[field_name]}``. New-style formatting allows accessing nested
+fields (e.g., ``{match[field_1_name][field_2_name]}``).
+
+In an aggregated alert, these fields come from the first match.
 
 Optional:
+
+``new_style_string_format``: If True, arguments are formatted using ``.format()`` rather than ``%``. The default is False.
 
 ``pipe_match_json``: If true, the match will be converted to JSON and passed to stdin of the command. Note that this will cause ElastAlert to block
 until the command exits or sends an EOF to stdout.
 
-Example usage::
+Example usage using old-style format::
 
     alert:
       - command
@@ -1037,6 +1168,12 @@ Example usage::
 
     Executing commmands with untrusted data can make it vulnerable to shell injection! If you use formatted data in
     your command, it is highly recommended that you use a args list format instead of a shell string.
+
+Example usage using new-style format::
+
+    alert:
+      - command
+    command: ["/bin/send_alert", "--username", "{match[username]}"]
 
 
 Email
@@ -1050,6 +1187,18 @@ This alert requires one additional option:
 ``email``: An address or list of addresses to sent the alert to.
 
 Optional:
+
+``email_from_field``: Use a field from the document that triggered the alert as the recipient. If the field cannot be found,
+the ``email`` value will be used as a default. Note that this field will not be available in every rule type, for example, if
+you have ``use_count_query`` or if it's ``type: flatline``. You can optionally add a domain suffix to the field to generate the
+address using ``email_add_domain``. For example, with the following settings::
+
+    email_from_field: "data.user"
+    email_add_domain: "@example.com"
+
+and a match ``{"@timestamp": "2017", "data": {"foo": "bar", "user": "qlo"}}``
+
+an email would be sent to ``qlo@example.com``
 
 ``smtp_host``: The SMTP host to use, defaults to localhost.
 
@@ -1072,7 +1221,7 @@ by the smtp server.
 ``bcc``: This adds the BCC emails to the list of recipients but does not show up in the email message. By default, this is left empty.
 
 Jira
-~~~~~
+~~~~
 
 The JIRA alerter will open a ticket on jira whenever an alert is triggered. You must have a service account for ElastAlert to connect with.
 The credentials of the service account are loaded from a separate file. The ticket number will be written to the alert pipeline, and if it
@@ -1188,9 +1337,9 @@ Optional:
 SNS
 ~~~
 
-The SNS alerter will send an SNS notification. The body of the notification is formatted the same as with other alerters. The SNS alerter
-uses boto and can use credentials in the rule yaml or in a standard boto credential file.
-See http://boto.readthedocs.org/en/latest/boto_config_tut.html#details for details.
+The SNS alerter will send an SNS notification. The body of the notification is formatted the same as with other alerters.
+The SNS alerter uses boto3 and can use credentials in the rule yaml, in a standard AWS credential and config files, or
+via environment variables. See http://docs.aws.amazon.com/cli/latest/userguide/cli-chap-getting-started.html for details.
 
 SNS requires one option:
 
@@ -1204,7 +1353,7 @@ Optional:
 
 ``aws_region``: The AWS region in which the SNS resource is located. Default is us-east-1
 
-``boto_profile``: The boto profile to use. If none specified, the default will be used.
+``profile``: The AWS profile to use. If none specified, the default will be used.
 
 HipChat
 ~~~~~~~
@@ -1255,14 +1404,17 @@ Optional:
 ``slack_channel_override``: Incoming webhooks have a default channel, but it can be overridden. A public channel can be specified "#other-channel", and a Direct Message with "@username".
 
 ``slack_emoji_override``: By default ElastAlert will use the :ghost: emoji when posting to the channel. You can use a different emoji per
-ElastAlert rule. Any Apple emoji can be used, see http://emojipedia.org/apple/
+ElastAlert rule. Any Apple emoji can be used, see http://emojipedia.org/apple/ . If slack_icon_url_override parameter is provided, emoji is ignored.
+
+``slack_icon_url_override``: By default ElastAlert will use the :ghost: emoji when posting to the channel. You can provide icon_url to use custom image.
+Provide absolute address of the pciture, for example: http://some.address.com/image.jpg .
 
 ``slack_msg_color``: By default the alert will be posted with the 'danger' color. You can also use 'good' or 'warning' colors.
 
 ``slack_proxy``: By default ElastAlert will not use a network proxy to send notifications to Slack. Set this option using ``hostname:port`` if you need to use a proxy.
 
 Telegram
-~~~~~
+~~~~~~~~
 Telegram alerter will send a notification to a predefined Telegram username or channel. The body of the notification is formatted the same as with other alerters.
 
 The alerter requires the following two options:
@@ -1292,6 +1444,44 @@ The alerter requires the following option:
 If there's no open (i.e. unresolved) incident with this key, a new one will be created. If there's already an open incident with a matching key, this event will be appended to that incident's log.
 
 ``pagerduty_proxy``: By default ElastAlert will not use a network proxy to send notifications to Pagerduty. Set this option using ``hostname:port`` if you need to use a proxy.
+
+Exotel
+~~~~~~
+
+Developers in India can use Exotel alerter, it will trigger an incident to a mobile phone as sms from your exophone. Alert name along with the message body will be sent as an sms.
+
+The alerter requires the following option:
+
+``exotel_accout_sid``: This is sid of your Exotel account.
+
+``exotel_auth_token``: Auth token assosiated with your Exotel account.
+
+If you don't know how to find your accound sid and auth token, refer - http://support.exotel.in/support/solutions/articles/3000023019-how-to-find-my-exotel-token-and-exotel-sid-
+
+``exotel_to_number``: The phone number where you would like send the notification.
+
+``exotel_from_number``: Your exophone number from which message will be sent.
+
+The alerter has one optional argument:
+
+``exotel_message_body``: Message you want to send in the sms, is you don't specify this argument only the rule name is sent
+
+
+Twilio
+~~~~~~
+
+Twilio alerter will trigger an incident to a mobile phone as sms from your twilio phone number. Alert name will arrive as sms once this option is chosen.
+
+The alerter requires the following option:
+
+``twilio_accout_sid``: This is sid of your twilio account.
+
+``twilio_auth_token``: Auth token assosiated with your twilio account.
+
+``twilio_to_number``: The phone number where you would like send the notification.
+
+``twilio_from_number``: Your twilio phone number from which message will be sent.
+
 
 VictorOps
 ~~~~~~~~~
@@ -1329,7 +1519,7 @@ Optional:
 ``gitter_proxy``: By default ElastAlert will not use a network proxy to send notifications to Gitter. Set this option using ``hostname:port`` if you need to use a proxy.
 
 ServiceNow
-~~~~~~
+~~~~~~~~~~
 
 The ServiceNow alerter will create a ne Incident in ServiceNow. The body of the notification is formatted the same as with other alerters.
 
@@ -1362,10 +1552,25 @@ Optional:
 
 
 Debug
-~~~~~~
+~~~~~
 
 The debug alerter will log the alert information using the Python logger at the info level. It is logged into a Python Logger object with the name ``elastalert`` that can be easily accessed using the ``getLogger`` command.
 
+Stomp
+~~~~~
+
+This alert type will use the STOMP protocol in order to push a message to a broker like ActiveMQ or RabbitMQ. The message body is a JSON string containing the alert details.
+The default values will work with a pristine ActiveMQ installation.
+
+Optional:
+
+``stomp_hostname``: The STOMP host to use, defaults to localhost.
+``stomp_hostport``: The STOMP port to use, defaults to 61613.
+``stomp_login``: The STOMP login to use, defaults to admin.
+``stomp_password``: The STOMP password to use, defaults to admin.
+``stomp_destination``: The STOMP destination to use, defaults to /queue/ALERT
+
+The stomp_destination field depends on the broker, the /queue/ALERT example is the nomenclature used by ActiveMQ. Each broker has its own logic.
 
 Alerter
 ~~~~~~~

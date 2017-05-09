@@ -25,7 +25,7 @@ definitions:
 
   filter: &filter {}
 
-required: [name, type, index, alert]
+required: [type, index, alert]
 type: object
 
 ### Rule Types section
@@ -112,6 +112,18 @@ oneOf:
       cardinality_field: {type: string}
       timeframe: *timeframe
 
+  - title: Metric Aggregation
+    required: [metric_agg_key,metric_agg_type]
+    properties:
+      type: {enum: [metric_aggregation]}
+      metric_agg_type: {enum: ["min", "max", "avg", "sum", "cardinality", "value_count"]}
+      #timeframe: *timeframe
+
+  - title: Percentage Match
+    required: [match_bucket_filter]
+    properties:
+      type: {enum: [percentage_match]}
+
   - title: Custom Rule from Module
     properties:
       # custom rules include a period in the rule type
@@ -132,6 +144,7 @@ properties:
   use_strftime_index: {type: boolean}
 
   # Optional Settings
+  import: {type: string}
   aggregation: *timeframe
   realert: *timeframe
   exponential_realert: *timeframe
@@ -160,6 +173,7 @@ properties:
   use_local_time: {type: boolean}
   match_enhancements: {type: array, items: {type: string}}
   query_key: *arrayOfString
+  replace_dots_in_field_names: {type: boolean}
 
   # Alert Content
   alert_text: {type: string} # Python format string
@@ -172,6 +186,7 @@ properties:
   ### Commands
   command: *arrayOfString
   pipe_match_json: {type: boolean}
+  fail_on_non_zero_exit: {type: boolean}
 
   ### Email
   email: *arrayOfString
@@ -209,6 +224,7 @@ properties:
   slack_webhook_url: *arrayOfString
   slack_username_override: {type: string}
   slack_emoji_override: {type: string}
+  slack_icon_url_override: {type: string}
   slack_msg_color: {enum: [good, warning, danger]}
   slack_parse_override: {enum: [none, full]}
   slack_text_string: {type: string}
@@ -216,6 +232,18 @@ properties:
   ### PagerDuty
   pagerduty_service_key: {type: string}
   pagerduty_client_name: {type: string}
+
+  ### Exotel
+  exotel_account_sid: {type: string}
+  exotel_auth_token: {type: string}
+  exotel_to_number: {type: string}
+  exotel_from_number: {type: string}
+
+  ### Twilio
+  twilio_accout_sid: {type: string}
+  twilio_auth_token: {type: string}
+  twilio_to_number: {type: string}
+  twilio_from_number: {type: string}
 
   ### VictorOps
   victorops_api_key: {type: string}
@@ -232,3 +260,7 @@ properties:
   gitter_webhook_url: {type: string}
   gitter_proxy: {type: string}
   gitter_msg_level: {enum: [info, error]}
+
+  ### Simple
+  simple_webhook_url: *arrayOfString
+  simple_proxy: {type: string}

@@ -14,6 +14,7 @@ from elastalert.alerts import CommandAlerter
 from elastalert.alerts import EmailAlerter
 from elastalert.alerts import JiraAlerter
 from elastalert.alerts import JiraFormattedMatchString
+from elastalert.alerts import SimplePostAlerter
 from elastalert.alerts import SlackAlerter
 from elastalert.config import load_modules
 from elastalert.opsgenie import OpsGenieAlerter
@@ -108,6 +109,39 @@ def test_email():
         assert 'To: testing@test.test' in body
         assert 'From: testfrom@test.test' in body
         assert 'Subject: Test alert for test_value, owned by owner_value' in body
+
+
+def test_email_from_field():
+    rule = {'name': 'test alert', 'email': ['testing@test.test'], 'email_add_domain': 'example.com',
+            'type': mock_rule(), 'timestamp_field': '@timestamp', 'email_from_field': 'data.user', 'owner': 'owner_value'}
+    # Found, without @
+    with mock.patch('elastalert.alerts.SMTP') as mock_smtp:
+        mock_smtp.return_value = mock.Mock()
+        alert = EmailAlerter(rule)
+        alert.alert([{'data': {'user': 'qlo'}}])
+        assert mock_smtp.mock_calls[4][1][1] == ['qlo@example.com']
+
+    # Found, with @
+    rule['email_add_domain'] = '@example.com'
+    with mock.patch('elastalert.alerts.SMTP') as mock_smtp:
+        mock_smtp.return_value = mock.Mock()
+        alert = EmailAlerter(rule)
+        alert.alert([{'data': {'user': 'qlo'}}])
+        assert mock_smtp.mock_calls[4][1][1] == ['qlo@example.com']
+
+    # Not found
+    with mock.patch('elastalert.alerts.SMTP') as mock_smtp:
+        mock_smtp.return_value = mock.Mock()
+        alert = EmailAlerter(rule)
+        alert.alert([{'data': {'foo': 'qlo'}}])
+        assert mock_smtp.mock_calls[4][1][1] == ['testing@test.test']
+
+    # Found, wrong type
+    with mock.patch('elastalert.alerts.SMTP') as mock_smtp:
+        mock_smtp.return_value = mock.Mock()
+        alert = EmailAlerter(rule)
+        alert.alert([{'data': {'user': 17}}])
+        assert mock_smtp.mock_calls[4][1][1] == ['testing@test.test']
 
 
 def test_email_with_unicode_strings():
@@ -219,9 +253,17 @@ def test_email_with_cc_and_bcc():
                     mock.call().ehlo(),
                     mock.call().has_extn('STARTTLS'),
                     mock.call().starttls(),
-                    mock.call().sendmail(mock.ANY,
-                                         ['testing@test.test', 'test@test.test', 'test1@test.com', 'test2@test.com', 'tester@testing.testing'],
-                                         mock.ANY),
+                    mock.call().sendmail(
+                        mock.ANY,
+                        [
+                            'testing@test.test',
+                            'test@test.test',
+                            'test1@test.com',
+                            'test2@test.com',
+                            'tester@testing.testing'
+                        ],
+                        mock.ANY
+                    ),
                     mock.call().close()]
         assert mock_smtp.mock_calls == expected
 
@@ -234,10 +276,18 @@ def test_email_with_cc_and_bcc():
 
 
 def test_email_with_args():
-    rule = {'name': 'test alert', 'email': ['testing@test.test', 'test@test.test'], 'from_addr': 'testfrom@test.test',
-            'type': mock_rule(), 'timestamp_field': '@timestamp', 'email_reply_to': 'test@example.com',
-            'alert_subject': 'Test alert for {0} {1}', 'alert_subject_args': ['test_term', 'test.term'], 'alert_text': 'Test alert for {0} and {1} {2}',
-            'alert_text_args': ['test_arg1', 'test_arg2', 'test.arg3']}
+    rule = {
+        'name': 'test alert',
+        'email': ['testing@test.test', 'test@test.test'],
+        'from_addr': 'testfrom@test.test',
+        'type': mock_rule(),
+        'timestamp_field': '@timestamp',
+        'email_reply_to': 'test@example.com',
+        'alert_subject': 'Test alert for {0} {1}',
+        'alert_subject_args': ['test_term', 'test.term'],
+        'alert_text': 'Test alert for {0} and {1} {2}',
+        'alert_text_args': ['test_arg1', 'test_arg2', 'test.arg3']
+    }
     with mock.patch('elastalert.alerts.SMTP') as mock_smtp:
         mock_smtp.return_value = mock.Mock()
 
@@ -472,13 +522,29 @@ def test_jira_arbitrary_field_support():
         {'name': 'arbitrary reference string field', 'id': 'arbitrary_reference_string_field', 'schema': {'type': 'string'}},
         {'name': 'arbitrary string field', 'id': 'arbitrary_string_field', 'schema': {'type': 'string'}},
         {'name': 'arbitrary string array field', 'id': 'arbitrary_string_array_field', 'schema': {'type': 'array', 'items': 'string'}},
-        {'name': 'arbitrary string array field provided as single value', 'id': 'arbitrary_string_array_field_provided_as_single_value', 'schema': {'type': 'array', 'items': 'string'}},
+        {
+            'name': 'arbitrary string array field provided as single value',
+            'id': 'arbitrary_string_array_field_provided_as_single_value',
+            'schema': {'type': 'array', 'items': 'string'}
+        },
         {'name': 'arbitrary number field', 'id': 'arbitrary_number_field', 'schema': {'type': 'number'}},
         {'name': 'arbitrary number array field', 'id': 'arbitrary_number_array_field', 'schema': {'type': 'array', 'items': 'number'}},
-        {'name': 'arbitrary number array field provided as single value', 'id': 'arbitrary_number_array_field_provided_as_single_value', 'schema': {'type': 'array', 'items': 'number'}},
+        {
+            'name': 'arbitrary number array field provided as single value',
+            'id': 'arbitrary_number_array_field_provided_as_single_value',
+            'schema': {'type': 'array', 'items': 'number'}
+        },
         {'name': 'arbitrary complex field', 'id': 'arbitrary_complex_field', 'schema': {'type': 'ArbitraryType'}},
-        {'name': 'arbitrary complex array field', 'id': 'arbitrary_complex_array_field', 'schema': {'type': 'array', 'items': 'ArbitraryType'}},
-        {'name': 'arbitrary complex array field provided as single value', 'id': 'arbitrary_complex_array_field_provided_as_single_value', 'schema': {'type': 'array', 'items': 'ArbitraryType'}},
+        {
+            'name': 'arbitrary complex array field',
+            'id': 'arbitrary_complex_array_field',
+            'schema': {'type': 'array', 'items': 'ArbitraryType'}
+        },
+        {
+            'name': 'arbitrary complex array field provided as single value',
+            'id': 'arbitrary_complex_array_field_provided_as_single_value',
+            'schema': {'type': 'array', 'items': 'ArbitraryType'}
+        },
     ]
 
     with nested(
@@ -572,7 +638,9 @@ def test_kibana(ea):
     with mock.patch("elastalert.elastalert.elasticsearch_client") as mock_es:
         mock_create = mock.Mock(return_value={'_id': 'ABCDEFGH'})
         mock_es_inst = mock.Mock()
-        mock_es_inst.create = mock_create
+        mock_es_inst.index = mock_create
+        mock_es_inst.host = 'test.testing'
+        mock_es_inst.port = 12345
         mock_es.return_value = mock_es_inst
         link = ea.generate_kibana_db(rule, match)
 
@@ -600,24 +668,51 @@ def test_command():
     rule = {'command': ['/bin/test/', '--arg', '%(somefield)s']}
     alert = CommandAlerter(rule)
     match = {'@timestamp': '2014-01-01T00:00:00',
-             'somefield': 'foobarbaz'}
+             'somefield': 'foobarbaz',
+             'nested': {'field': 1}}
     with mock.patch("elastalert.alerts.subprocess.Popen") as mock_popen:
         alert.alert([match])
     assert mock_popen.called_with(['/bin/test', '--arg', 'foobarbaz'], stdin=subprocess.PIPE, shell=False)
 
-    # Test command as string with formatted arg
+    # Test command as string with formatted arg (old-style string format)
     rule = {'command': '/bin/test/ --arg %(somefield)s'}
     alert = CommandAlerter(rule)
     with mock.patch("elastalert.alerts.subprocess.Popen") as mock_popen:
         alert.alert([match])
     assert mock_popen.called_with('/bin/test --arg foobarbaz', stdin=subprocess.PIPE, shell=False)
 
-    # Test command as string without formatted arg
+    # Test command as string without formatted arg (old-style string format)
     rule = {'command': '/bin/test/foo.sh'}
     alert = CommandAlerter(rule)
     with mock.patch("elastalert.alerts.subprocess.Popen") as mock_popen:
         alert.alert([match])
     assert mock_popen.called_with('/bin/test/foo.sh', stdin=subprocess.PIPE, shell=True)
+
+    # Test command as string with formatted arg (new-style string format)
+    rule = {'command': '/bin/test/ --arg {match[somefield]}', 'new_style_string_format': True}
+    alert = CommandAlerter(rule)
+    with mock.patch("elastalert.alerts.subprocess.Popen") as mock_popen:
+        alert.alert([match])
+    assert mock_popen.called_with('/bin/test --arg foobarbaz', stdin=subprocess.PIPE, shell=False)
+
+    rule = {'command': '/bin/test/ --arg {match[nested][field]}', 'new_style_string_format': True}
+    alert = CommandAlerter(rule)
+    with mock.patch("elastalert.alerts.subprocess.Popen") as mock_popen:
+        alert.alert([match])
+    assert mock_popen.called_with('/bin/test --arg 1', stdin=subprocess.PIPE, shell=False)
+
+    # Test command as string without formatted arg (new-style string format)
+    rule = {'command': '/bin/test/foo.sh', 'new_style_string_format': True}
+    alert = CommandAlerter(rule)
+    with mock.patch("elastalert.alerts.subprocess.Popen") as mock_popen:
+        alert.alert([match])
+    assert mock_popen.called_with('/bin/test/foo.sh', stdin=subprocess.PIPE, shell=True)
+
+    rule = {'command': '/bin/test/foo.sh {{bar}}', 'new_style_string_format': True}
+    alert = CommandAlerter(rule)
+    with mock.patch("elastalert.alerts.subprocess.Popen") as mock_popen:
+        alert.alert([match])
+    assert mock_popen.called_with('/bin/test/foo.sh {bar}', stdin=subprocess.PIPE, shell=True)
 
     # Test command with pipe_match_json
     rule = {'command': ['/bin/test/', '--arg', '%(somefield)s'],
@@ -632,6 +727,21 @@ def test_command():
         alert.alert([match])
     assert mock_popen.called_with(['/bin/test', '--arg', 'foobarbaz'], stdin=subprocess.PIPE, shell=False)
     assert mock_subprocess.communicate.called_with(input=json.dumps(match))
+
+    # Test command with fail_on_non_zero_exit
+    rule = {'command': ['/bin/test/', '--arg', '%(somefield)s'],
+            'fail_on_non_zero_exit': True}
+    alert = CommandAlerter(rule)
+    match = {'@timestamp': '2014-01-01T00:00:00',
+             'somefield': 'foobarbaz'}
+    with pytest.raises(Exception) as exception:
+        with mock.patch("elastalert.alerts.subprocess.Popen") as mock_popen:
+            mock_subprocess = mock.Mock()
+            mock_popen.return_value = mock_subprocess
+            mock_subprocess.wait.return_value = 1
+            alert.alert([match])
+    assert mock_popen.called_with(['/bin/test', '--arg', 'foobarbaz'], stdin=subprocess.PIPE, shell=False)
+    assert "Non-zero exit code while running command" in str(exception)
 
 
 def test_slack_uses_custom_title():
@@ -666,7 +776,12 @@ def test_slack_uses_custom_title():
         'text': '',
         'parse': 'none'
     }
-    mock_post_request.assert_called_once_with(rule['slack_webhook_url'], data=mock.ANY, headers={'content-type': 'application/json'}, proxies=None)
+    mock_post_request.assert_called_once_with(
+        rule['slack_webhook_url'],
+        data=mock.ANY,
+        headers={'content-type': 'application/json'},
+        proxies=None
+    )
     assert expected_data == json.loads(mock_post_request.call_args_list[0][1]['data'])
 
 
@@ -701,7 +816,12 @@ def test_slack_uses_rule_name_when_custom_title_is_not_provided():
         'text': '',
         'parse': 'none'
     }
-    mock_post_request.assert_called_once_with(rule['slack_webhook_url'][0], data=mock.ANY, headers={'content-type': 'application/json'}, proxies=None)
+    mock_post_request.assert_called_once_with(
+        rule['slack_webhook_url'][0],
+        data=mock.ANY,
+        headers={'content-type': 'application/json'},
+        proxies=None
+    )
     assert expected_data == json.loads(mock_post_request.call_args_list[0][1]['data'])
 
 
@@ -737,7 +857,41 @@ def test_slack_uses_custom_slack_channel():
         'text': '',
         'parse': 'none'
     }
-    mock_post_request.assert_called_once_with(rule['slack_webhook_url'][0], data=mock.ANY, headers={'content-type': 'application/json'}, proxies=None)
+    mock_post_request.assert_called_once_with(
+        rule['slack_webhook_url'][0],
+        data=mock.ANY,
+        headers={'content-type': 'application/json'},
+        proxies=None
+    )
+    assert expected_data == json.loads(mock_post_request.call_args_list[0][1]['data'])
+
+
+def test_simple_alerter():
+    rule = {
+        'name': 'Test Simple Rule',
+        'type': 'any',
+        'simple_webhook_url': 'http://test.webhook.url',
+        'alert_subject': 'Cool subject',
+        'alert': []
+    }
+    load_modules(rule)
+    alert = SimplePostAlerter(rule)
+    match = {
+        '@timestamp': '2017-01-01T00:00:00',
+        'somefield': 'foobarbaz'
+    }
+    with mock.patch('requests.post') as mock_post_request:
+        alert.alert([match])
+    expected_data = {
+        'rule': rule['name'],
+        'matches': [match]
+    }
+    mock_post_request.assert_called_once_with(
+        rule['simple_webhook_url'],
+        data=mock.ANY,
+        headers={'Content-Type': 'application/json', 'Accept': 'application/json;charset=utf-8'},
+        proxies=None
+    )
     assert expected_data == json.loads(mock_post_request.call_args_list[0][1]['data'])
 
 

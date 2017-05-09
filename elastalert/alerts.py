@@ -14,13 +14,17 @@ from smtplib import SMTPAuthenticationError
 from smtplib import SMTPException
 from socket import error
 
-import boto.sns as sns
+import boto3
 import requests
+import stomp
+from exotel import Exotel
 from jira.client import JIRA
 from jira.exceptions import JIRAError
 from requests.exceptions import RequestException
 from staticconf.loader import yaml_loader
 from texttable import Texttable
+from twilio.base.exceptions import TwilioRestException
+from twilio.rest import Client as TwilioClient
 from util import EAException
 from util import elastalert_logger
 from util import lookup_es_key
@@ -246,7 +250,9 @@ class Alerter(object):
                 summary_table_fields = [summary_table_fields]
             # Include a count aggregation so that we can see at a glance how many of each aggregation_key were encountered
             summary_table_fields_with_count = summary_table_fields + ['count']
-            text += "Aggregation resulted in the following data for summary_table_fields ==> {0}:\n\n".format(summary_table_fields_with_count)
+            text += "Aggregation resulted in the following data for summary_table_fields ==> {0}:\n\n".format(
+                summary_table_fields_with_count
+            )
             text_table = Texttable()
             text_table.header(summary_table_fields_with_count)
             match_aggregation = {}
@@ -277,6 +283,55 @@ class Alerter(object):
             raise EAException('Account file must have user and password fields')
         self.user = account_conf['user']
         self.password = account_conf['password']
+
+
+class StompAlerter(Alerter):
+    """ The stomp alerter publishes alerts via stomp to a broker. """
+    required_options = frozenset(['stomp_hostname', 'stomp_hostport', 'stomp_login', 'stomp_password'])
+
+    def alert(self, matches):
+
+        alerts = []
+
+        qk = self.rule.get('query_key', None)
+        fullmessage = {}
+        for match in matches:
+            if qk in match:
+                elastalert_logger.info(
+                    'Alert for %s, %s at %s:' % (self.rule['name'], match[qk], lookup_es_key(match, self.rule['timestamp_field'])))
+                alerts.append(
+                    '1)Alert for %s, %s at %s:' % (self.rule['name'], match[qk], lookup_es_key(match, self.rule['timestamp_field']))
+                )
+                fullmessage['match'] = match[qk]
+            else:
+                elastalert_logger.info('Alert for %s at %s:' % (self.rule['name'], lookup_es_key(match, self.rule['timestamp_field'])))
+                alerts.append(
+                    '2)Alert for %s at %s:' % (self.rule['name'], lookup_es_key(match, self.rule['timestamp_field']))
+                )
+                fullmessage['match'] = lookup_es_key(match, self.rule['timestamp_field'])
+            elastalert_logger.info(unicode(BasicMatchString(self.rule, match)))
+
+        fullmessage['alerts'] = alerts
+        fullmessage['rule'] = self.rule['name']
+        fullmessage['matching'] = unicode(BasicMatchString(self.rule, match))
+        fullmessage['alertDate'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        fullmessage['body'] = self.create_alert_body(matches)
+
+        self.stomp_hostname = self.rule.get('stomp_hostname', 'localhost')
+        self.stomp_hostport = self.rule.get('stomp_hostport', '61613')
+        self.stomp_login = self.rule.get('stomp_login', 'admin')
+        self.stomp_password = self.rule.get('stomp_password', 'admin')
+        self.stomp_destination = self.rule.get('stomp_destination', '/queue/ALERT')
+
+        conn = stomp.Connection([(self.stomp_hostname, self.stomp_hostport)])
+
+        conn.start()
+        conn.connect(self.stomp_login, self.stomp_password)
+        conn.send(self.stomp_destination, json.dumps(fullmessage))
+        conn.disconnect()
+
+    def get_info(self):
+        return {'type': 'stomp'}
 
 
 class DebugAlerter(Alerter):
@@ -320,6 +375,9 @@ class EmailAlerter(Alerter):
         bcc = self.rule.get('bcc')
         if bcc and isinstance(bcc, basestring):
             self.rule['bcc'] = [self.rule['bcc']]
+        add_suffix = self.rule.get('email_add_domain')
+        if add_suffix and not add_suffix.startswith('@'):
+            self.rule['email_add_domain'] = '@' + add_suffix
 
     def alert(self, matches):
         body = self.create_alert_body(matches)
@@ -330,9 +388,16 @@ class EmailAlerter(Alerter):
             body += '\nJIRA ticket: %s' % (url)
 
         to_addr = self.rule['email']
+        if 'email_from_field' in self.rule:
+            recipient = lookup_es_key(matches[0], self.rule['email_from_field'])
+            if isinstance(recipient, basestring):
+                if '@' in recipient:
+                    to_addr = [recipient]
+                elif 'email_add_domain' in self.rule:
+                    to_addr = [recipient + self.rule['email_add_domain']]
         email_msg = MIMEText(body.encode('UTF-8'), _charset='UTF-8')
         email_msg['Subject'] = self.create_title(matches)
-        email_msg['To'] = ', '.join(self.rule['email'])
+        email_msg['To'] = ', '.join(to_addr)
         email_msg['From'] = self.from_addr
         email_msg['Reply-To'] = self.rule.get('email_reply_to', email_msg['To'])
         email_msg['Date'] = formatdate()
@@ -365,7 +430,7 @@ class EmailAlerter(Alerter):
         self.smtp.sendmail(self.from_addr, to_addr, email_msg.as_string())
         self.smtp.close()
 
-        elastalert_logger.info("Sent email to %s" % (self.rule['email']))
+        elastalert_logger.info("Sent email to %s" % (to_addr))
 
     def create_default_title(self, matches):
         subject = 'ElastAlert: %s' % (self.rule['name'])
@@ -535,6 +600,8 @@ class JiraAlerter(Alerter):
                     elif array_items == 'number':
                         self.jira_args[arg_name] = [int(v) for v in value]
                     # Also attempt to handle arrays of complex types that have to be passed as objects with an identifier 'key'
+                    elif array_items == 'option':
+                        self.jira_args[arg_name] = [{'value': v} for v in value]
                     else:
                         # Try setting it as an object, using 'name' as the key
                         # This may not work, as the key might actually be 'key', 'id', 'value', or something else
@@ -553,6 +620,8 @@ class JiraAlerter(Alerter):
                     # Number type
                     elif arg_type == 'number':
                         self.jira_args[arg_name] = int(value)
+                    elif arg_type == 'option':
+                        self.jira_args[arg_name] = {'value': value}
                     # Complex type
                     else:
                         self.jira_args[arg_name] = {'name': value}
@@ -638,10 +707,14 @@ class JiraAlerter(Alerter):
                     except Exception as ex:
                         # Re-raise the exception, preserve the stack-trace, and give some
                         # context as to which watcher failed to be added
-                        raise Exception("Exception encountered when trying to add '{0}' as a watcher. Does the user exist?\n{1}" .format(watcher, ex)), None, sys.exc_info()[2]
+                        raise Exception(
+                                "Exception encountered when trying to add '{0}' as a watcher. Does the user exist?\n{1}" .format(
+                                    watcher,
+                                    ex
+                                )), None, sys.exc_info()[2]
 
         except JIRAError as e:
-            raise EAException("Error creating JIRA ticket: %s" % (e))
+            raise EAException("Error creating JIRA ticket using jira_args (%s): %s" % (self.jira_args, e))
         elastalert_logger.info("Opened Jira ticket: %s" % (self.issue))
 
         if self.pipeline is not None:
@@ -691,7 +764,9 @@ class CommandAlerter(Alerter):
 
     def __init__(self, *args):
         super(CommandAlerter, self).__init__(*args)
+
         self.last_command = []
+
         self.shell = False
         if isinstance(self.rule['command'], basestring):
             self.shell = True
@@ -699,10 +774,17 @@ class CommandAlerter(Alerter):
                 logging.warning('Warning! You could be vulnerable to shell injection!')
             self.rule['command'] = [self.rule['command']]
 
+        self.new_style_string_format = False
+        if 'new_style_string_format' in self.rule and self.rule['new_style_string_format']:
+            self.new_style_string_format = True
+
     def alert(self, matches):
         # Format the command and arguments
         try:
-            command = [command_arg % matches[0] for command_arg in self.rule['command']]
+            if self.new_style_string_format:
+                command = [command_arg.format(match=matches[0]) for command_arg in self.rule['command']]
+            else:
+                command = [command_arg % matches[0] for command_arg in self.rule['command']]
             self.last_command = command
         except KeyError as e:
             raise EAException("Error formatting command: %s" % (e))
@@ -714,6 +796,8 @@ class CommandAlerter(Alerter):
             if self.rule.get('pipe_match_json'):
                 match_json = json.dumps(matches, cls=DateTimeEncoder) + '\n'
                 stdout, stderr = subp.communicate(input=match_json)
+            if self.rule.get("fail_on_non_zero_exit", False) and subp.wait():
+                raise EAException("Non-zero exit code while running command %s" % (' '.join(command)))
         except OSError as e:
             raise EAException("Error while running command %s: %s" % (' '.join(command), e))
 
@@ -729,10 +813,11 @@ class SnsAlerter(Alerter):
     def __init__(self, *args):
         super(SnsAlerter, self).__init__(*args)
         self.sns_topic_arn = self.rule.get('sns_topic_arn', '')
-        self.aws_access_key = self.rule.get('aws_access_key', '')
-        self.aws_secret_key = self.rule.get('aws_secret_key', '')
+        self.aws_access_key_id = self.rule.get('aws_access_key_id')
+        self.aws_secret_access_key = self.rule.get('aws_secret_access_key')
         self.aws_region = self.rule.get('aws_region', 'us-east-1')
-        self.boto_profile = self.rule.get('boto_profile', '')
+        self.profile = self.rule.get('boto_profile', None)  # Deprecated
+        self.profile = self.rule.get('aws_profile', None)
 
     def create_default_title(self, matches):
         subject = 'ElastAlert: %s' % (self.rule['name'])
@@ -741,18 +826,13 @@ class SnsAlerter(Alerter):
     def alert(self, matches):
         body = self.create_alert_body(matches)
 
-        # use aws_access_key and aws_secret_key if specified; then use boto profile if specified;
-        # otherwise use instance role
-        if not self.aws_access_key and not self.aws_secret_key:
-            if not self.boto_profile:
-                sns_client = sns.connect_to_region(self.aws_region)
-            else:
-                sns_client = sns.connect_to_region(self.aws_region,
-                                                   profile_name=self.boto_profile)
-        else:
-            sns_client = sns.connect_to_region(self.aws_region,
-                                               aws_access_key_id=self.aws_access_key,
-                                               aws_secret_access_key=self.aws_secret_key)
+        session = boto3.Session(
+            aws_access_key_id=self.aws_access_key_id,
+            aws_secret_access_key=self.aws_secret_access_key,
+            region_name=self.aws_region,
+            profile_name=self.profile
+        )
+        sns_client = session.client('sns')
         sns_client.publish(self.sns_topic_arn, body, subject=self.create_title(matches))
         elastalert_logger.info("Sent sns notification to %s" % (self.sns_topic_arn))
 
@@ -828,6 +908,7 @@ class SlackAlerter(Alerter):
         self.slack_username_override = self.rule.get('slack_username_override', 'elastalert')
         self.slack_channel_override = self.rule.get('slack_channel_override', '')
         self.slack_emoji_override = self.rule.get('slack_emoji_override', ':ghost:')
+        self.slack_icon_url_override = self.rule.get('slack_icon_url_override', '')
         self.slack_msg_color = self.rule.get('slack_msg_color', 'danger')
         self.slack_parse_override = self.rule.get('slack_parse_override', 'none')
         self.slack_text_string = self.rule.get('slack_text_string', '')
@@ -851,7 +932,6 @@ class SlackAlerter(Alerter):
         payload = {
             'username': self.slack_username_override,
             'channel': self.slack_channel_override,
-            'icon_emoji': self.slack_emoji_override,
             'parse': self.slack_parse_override,
             'text': self.slack_text_string,
             'attachments': [
@@ -863,6 +943,10 @@ class SlackAlerter(Alerter):
                 }
             ]
         }
+        if self.slack_icon_url_override != '':
+            payload['icon_url'] = self.slack_icon_url_override
+        else:
+            payload['icon_emoji'] = self.slack_emoji_override
 
         for url in self.slack_webhook_url:
             try:
@@ -909,7 +993,12 @@ class PagerDutyAlerter(Alerter):
         # set https proxy, if it was provided
         proxies = {'https': self.pagerduty_proxy} if self.pagerduty_proxy else None
         try:
-            response = requests.post(self.url, data=json.dumps(payload, cls=DateTimeEncoder, ensure_ascii=False), headers=headers, proxies=proxies)
+            response = requests.post(
+                self.url,
+                data=json.dumps(payload, cls=DateTimeEncoder, ensure_ascii=False),
+                headers=headers,
+                proxies=proxies
+            )
             response.raise_for_status()
         except RequestException as e:
             raise EAException("Error posting to pagerduty: %s" % e)
@@ -918,6 +1007,61 @@ class PagerDutyAlerter(Alerter):
     def get_info(self):
         return {'type': 'pagerduty',
                 'pagerduty_client_name': self.pagerduty_client_name}
+
+
+class ExotelAlerter(Alerter):
+    required_options = frozenset(['exotel_account_sid', 'exotel_auth_token', 'exotel_to_number', 'exotel_from_number'])
+
+    def __init__(self, rule):
+        super(ExotelAlerter, self).__init__(rule)
+        self.exotel_account_sid = self.rule['exotel_account_sid']
+        self.exotel_auth_token = self.rule['exotel_auth_token']
+        self.exotel_to_number = self.rule['exotel_to_number']
+        self.exotel_from_number = self.rule['exotel_from_number']
+        self.sms_body = self.rule.get('exotel_message_body', '')
+
+    def alert(self, matches):
+        client = Exotel(self.exotel_account_sid, self.exotel_auth_token)
+
+        try:
+            message_body = self.rule['name'] + self.sms_body
+            response = client.sms(self.rule['exotel_from_number'], self.rule['exotel_to_number'], message_body)
+            if response != 200:
+                raise EAException("Error posting to Exotel, response code is %s" % response)
+        except:
+            raise EAException("Error posting to Exotel")
+        elastalert_logger.info("Trigger sent to Exotel")
+
+    def get_info(self):
+        return {'type': 'exotel', 'exotel_account': self.exotel_account_sid}
+
+
+class TwilioAlerter(Alerter):
+    required_options = frozenset(['twilio_accout_sid', 'twilio_auth_token', 'twilio_to_number', 'twilio_from_number'])
+
+    def __init__(self, rule):
+        super(TwilioAlerter, self).__init__(rule)
+        self.twilio_accout_sid = self.rule['twilio_accout_sid']
+        self.twilio_auth_token = self.rule['twilio_auth_token']
+        self.twilio_to_number = self.rule['twilio_to_number']
+        self.twilio_from_number = self.rule['twilio_from_number']
+
+    def alert(self, matches):
+        client = TwilioClient(self.twilio_accout_sid, self.twilio_auth_token)
+
+        try:
+            client.messages.create(body=self.rule['name'],
+                                   to=self.twilio_to_number,
+                                   from_=self.twilio_from_number)
+
+        except TwilioRestException as e:
+            raise EAException("Error posting to twilio: %s" % e)
+
+        elastalert_logger.info("Trigger sent to Twilio")
+
+    def get_info(self):
+        return {'type': 'twilio',
+                'twilio_client_name': self.twilio_from_number}
 
 
 class VictorOpsAlerter(Alerter):
@@ -1042,7 +1186,18 @@ class GitterAlerter(Alerter):
 
 class ServiceNowAlerter(Alerter):
     """ Creates a ServiceNow alert """
-    required_options = set(['username', 'password', 'servicenow_rest_url', 'short_description', 'comments', 'assignment_group', 'category', 'subcategory', 'cmdb_ci', 'caller_id'])
+    required_options = set([
+        'username',
+        'password',
+        'servicenow_rest_url',
+        'short_description',
+        'comments',
+        'assignment_group',
+        'category',
+        'subcategory',
+        'cmdb_ci',
+        'caller_id'
+    ])
 
     def __init__(self, rule):
         super(GitterAlerter, self).__init__(rule)
@@ -1071,7 +1226,13 @@ class ServiceNowAlerter(Alerter):
             "caller_id": self.rule["caller_id"]
         }
         try:
-            response = requests.post(self.servicenow_rest_url, auth=(self.rule['username'], self.rule['password']), headers=headers, data=json.dumps(payload, cls=DateTimeEncoder), proxies=proxies)
+            response = requests.post(
+                self.servicenow_rest_url,
+                auth=(self.rule['username'], self.rule['password']),
+                headers=headers,
+                data=json.dumps(payload, cls=DateTimeEncoder),
+                proxies=proxies
+            )
             response.raise_for_status()
         except RequestException as e:
             raise EAException("Error posting to ServiceNow: %s" % e)
@@ -1080,3 +1241,35 @@ class ServiceNowAlerter(Alerter):
     def get_info(self):
         return {'type': 'ServiceNow',
                 'self.servicenow_rest_url': self.servicenow_rest_url}
+
+
+class SimplePostAlerter(Alerter):
+    def __init__(self, rule):
+        super(SimplePostAlerter, self).__init__(rule)
+        simple_webhook_url = self.rule.get('simple_webhook_url')
+        if isinstance(simple_webhook_url, basestring):
+            simple_webhook_url = [simple_webhook_url]
+        self.simple_webhook_url = simple_webhook_url
+        self.simple_proxy = self.rule.get('simple_proxy')
+
+    def alert(self, matches):
+        payload = {
+            'rule': self.rule['name'],
+            'matches': matches
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json;charset=utf-8"
+        }
+        proxies = {'https': self.simple_proxy} if self.simple_proxy else None
+        for url in self.simple_webhook_url:
+            try:
+                response = requests.post(url, data=json.dumps(payload, cls=DateTimeEncoder), headers=headers, proxies=proxies)
+                response.raise_for_status()
+            except RequestException as e:
+                raise EAException("Error posting simple alert: %s" % e)
+        elastalert_logger.info("Simple alert sent")
+
+    def get_info(self):
+        return {'type': 'simple',
+                'simple_webhook_url': self.simple_webhook_url}
